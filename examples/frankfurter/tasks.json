@@ -1,0 +1,9 @@
+[
+  {
+    "id": "usd-cad",
+    "entrypoint": "tasks/rates.py:rates",
+    "schedule": {"interval": 43200, "anchor_date": "2026-01-01T00:00:00Z", "timezone": "UTC"},
+    "catch_up": "fresh",
+    "concurrency_limit": 1
+  }
+]

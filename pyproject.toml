@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "watcher-macos"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = ["prefect==3.8.8", "watchfiles==1.3.0", "sqlalchemy>=2.0,<2.1"]
+
+[dependency-groups]
+dev = ["pytest==9.1.1", "psutil==7.2.2"]
+
+[project.scripts]
+watcher = "watcher.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["watcher*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: starts a real local Prefect server", "native: launches the macOS app with isolated preferences and muted notifications"]
