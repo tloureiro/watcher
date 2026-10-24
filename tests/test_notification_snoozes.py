@@ -103,6 +103,11 @@ def settings(path):
         return json.loads(db.execute("SELECT value FROM notification_preferences WHERE id=1").fetchone()[0])
 
 
+def history(path):
+    with closing(sqlite3.connect(path)) as db:
+        return [json.loads(row[0]) for row in db.execute("SELECT value FROM notification_history ORDER BY timestamp DESC, id DESC")]
+
+
 def test_snooze_scopes_breaking_expiry_and_transaction_rollback(tmp_path, snooze_tool):
     invoke(snooze_tool, "exercise", tmp_path / "data.db")
 
@@ -190,9 +195,14 @@ def test_native_bridge_respects_snoozes_and_scopes_delivery_keys(tmp_path, monke
                 assert result.status_code == 200, result.text
             send(payload)
             assert len(settings(path)["snoozes"]) == 1 # Changed messages don't break ordinary task snoozes.
+            assert len(history(path)) == 1 and history(path)[0]["delivery"] == "snoozed"
+            first_occurrence = history(path)[0]
+            send(payload)
+            assert history(path) == [first_occurrence]
             # Same delivery key in another task/alert must still be processed.
             send({**payload, "task_id": "weather"})
             assert any(alert["taskID"] == "weather" for alert in settings(path)["alerts"].values())
+            assert history(path)[0]["delivery"] == "muted"
             send({**payload, "alert_id": "new-alert"})
             assert len(settings(path)["snoozes"]) == 1 # New conditions stay silenced too.
             # An explicitly breakable task snooze is cleared for a changed body.
@@ -219,6 +229,18 @@ def test_native_bridge_respects_snoozes_and_scopes_delivery_keys(tmp_path, monke
                              if alert["alertID"] == "integration" and alert["taskID"] == "stocks")
             assert delivered["subject"] == "Integration"
             assert delivered["body"] == "From real block"
+            assert len([item for item in history(path) if item["alert"]["alertID"] == "integration"]) == 2
+            # A history write failure is retryable and must not poison deduplication.
+            with connection(ws.root) as db:
+                db.execute("CREATE TRIGGER reject_history BEFORE INSERT ON notification_history BEGIN SELECT RAISE(ABORT, 'synthetic history failure'); END")
+            failed_history = {**payload, "key": "history-write-retry"}
+            assert httpx.post(bridge["url"], headers=headers, json=failed_history).status_code == 503
+            with connection(ws.root) as db:
+                db.execute("DROP TRIGGER reject_history")
+            send(failed_history)
+            saved_history = history(path)
+            send(failed_history)
+            assert history(path) == saved_history
             # Corrupt settings must fail the transport, not bypass a snooze.
             with connection(ws.root) as db:
                 saved = db.execute("SELECT value FROM notification_preferences WHERE id=1").fetchone()[0]

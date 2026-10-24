@@ -61,7 +61,7 @@ def test_native_menu_groups_artifact_routing_and_empty_states(tmp_path):
         return {row["title"]: row for row in json.loads(result.stdout) if not row["separator"]}
     menu = inspect()
     assert all(group in menu for group in ["Active Tasks", "Automation", "Notifications", "Workspace", "Settings"])
-    assert "Run Task" not in menu and "Stop Immediately" not in menu and len(menu) <= 11
+    assert "Run Task" not in menu and "Stop Immediately" not in menu and len(menu) <= 12
     task = menu["Active Tasks"]["children"][0]
     actions = {row["title"]: row for row in task["children"]}
     assert actions["Open Latest Artifact"]["action"] == "openLatestArtifact:"

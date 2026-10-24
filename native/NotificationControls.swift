@@ -41,7 +41,7 @@ extension Companion {
         NSApp.activate(ignoringOtherApps: true)
         let dialog = NSAlert()
         dialog.messageText = existing == nil ? "Snooze notifications" : "Extend snooze"
-        dialog.informativeText = "\(alert.subject)\n\(alert.taskID.isEmpty ? "" : "Task: " + alert.taskID + "\n")Checks continue running. Suppressed notifications are discarded."
+        dialog.informativeText = "\(alert.subject)\n\(alert.taskID.isEmpty ? "" : "Task: " + alert.taskID + "\n")Checks continue running. Snoozed messages remain in Recent Notifications without sending a desktop banner."
         dialog.addButton(withTitle: existing == nil ? "Snooze" : "Save")
         dialog.addButton(withTitle: "Cancel")
         let scope = NSPopUpButton(frame: NSRect(x: 0, y: 75, width: 340, height: 26))

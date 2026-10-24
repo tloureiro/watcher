@@ -42,6 +42,7 @@ class Service:
             self.phase = message
         print(json.dumps({"phase": self.phase, "error": self.error, "workspace": str(self.ws.root), "workspace_id": self.ws.id,
                           "runtime": str(self.ws.runtime),
+                          "history_days": self.ws.config.get("history_days", 90),
                           "disabled": self.disabled, "paused": self.paused, "active": self.runner.active_count if self.runner else 0,
                           "dashboard": f"http://127.0.0.1:{self.port}", "tasks": list(self.tasks),
                           "task_menu": self.task_menu, "task_menu_error": self.task_menu_error,

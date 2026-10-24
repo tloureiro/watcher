@@ -96,6 +96,8 @@ October 17 menu follow-up: use native submenus for Automation, Notifications, Wo
 
 The native menu bar companion is accepted. It provides a quick view of system health and control without requiring the dashboard to remain open.
 
+The notification-history follow-up adds **Recent Notifications** beside Active Tasks, above Recent Activity. The submenu shows the newest ten occurrences with elapsed times, full-text hover previews, and click-through to a selectable detail view. **View All Notifications…** provides a paged native list and full details, Copy Message, available run links, and existing snooze controls. Muted and snoozed messages remain visible with explicit labels. History is private to the selected workspace, survives restarts and snapshots, and uses the existing `history_days` retention. It remains accessible with automation disabled. Browsing neither clears history nor removes Notification Center entries.
+
 The **Searchlight** icon is a solid lighthouse with one beam pointing right. Use this monochrome silhouette in a fixed-width menu bar slot, with simple shape changes for status and gentle beam motion only during active work.
 
 Intended status distinctions:

@@ -81,6 +81,13 @@ final class Companion: NSObject, NSApplicationDelegate, UNUserNotificationCenter
     var bridgeWorkspace = ""
     let notificationQueue = DispatchQueue(label: "local.watcher.notifications")
     var notificationsInFlight = Set<String>()
+    let notificationOperations = DispatchGroup()
+    var recentNotifications: [NotificationOccurrence] = []
+    var historyLoaded = false
+    var historyError: String?
+    var historyGeneration = 0
+    var historyWindow: NotificationHistoryWindow?
+    var notificationHistoryMenu: NSMenu?
     var quitting = false
     var preparingWorkspace = false
     var menuTracking = false
@@ -139,12 +146,14 @@ final class Companion: NSObject, NSApplicationDelegate, UNUserNotificationCenter
     }
     func menuNeedsUpdate(_ menu: NSMenu) {
         if menu === activeTasksMenu { populateTasks(menu) }
+        else if menu === notificationHistoryMenu { populateNotificationHistory(menu) }
         else { rebuild(menu) }
     }
     func menuWillOpen(_ menu: NSMenu) {
         if menu === item.menu {
             menuTracking = true
             if process?.isRunning == true { send(["action": "task_menu"]) }
+            refreshNotificationHistory()
         }
     }
     func menuDidClose(_ menu: NSMenu) {
@@ -203,6 +212,9 @@ final class Companion: NSObject, NSApplicationDelegate, UNUserNotificationCenter
         activeTasksMenu = group(menu, "Active Tasks")
         activeTasksMenu?.delegate = self
         populateTasks(activeTasksMenu!)
+        notificationHistoryMenu = group(menu, "Recent Notifications")
+        notificationHistoryMenu?.delegate = self
+        populateNotificationHistory(notificationHistoryMenu!)
         let engineAvailable = state["disabled"] as? Bool != true && process?.isRunning == true && state["can_run"] as? Bool == true
         add(menu, "Recent Activity", #selector(activity), enabled: engineAvailable)
         add(menu, "Open Prefect Dashboard", #selector(dashboard), enabled: engineAvailable)
@@ -270,7 +282,7 @@ final class Companion: NSObject, NSApplicationDelegate, UNUserNotificationCenter
     }
     func launch(_ path: String) {
         guard process == nil else {
-            notificationQueue.async { DispatchQueue.main.async { self.send(["action": "switch", "path": path]) } }
+            drainNotifications { self.send(["action": "switch", "path": path]) }
             return
         }
         let local = localHome
@@ -323,15 +335,10 @@ final class Companion: NSObject, NSApplicationDelegate, UNUserNotificationCenter
             if let value = try? JSONSerialization.jsonObject(with: line) as? [String: Any], value["phase"] != nil {
                 let failed = value["phase"] as? String == "engine-error" && state["phase"] as? String != "engine-error"
                 state = value
-                if failed && !defaults.bool(forKey: "muted") {
-                    let content = UNMutableNotificationContent()
-                    content.title = "Watcher engine stopped"
-                    content.body = "Automation is unavailable. Open Watcher to inspect the error and restart."
-                    content.userInfo = ["workspace": state["workspace_id"] as? String ?? ""]
-                    center.add(UNNotificationRequest(identifier: "watcher-engine-error", content: content, trigger: nil))
-                }
                 if let path = state["workspace"] as? String { defaults.set(path, forKey: "workspace") }
                 publishBridge()
+                if failed { notifyEngineStopped() }
+                historyWindow?.updateActions()
                 rebuild()
             }
         }
@@ -461,10 +468,15 @@ final class Companion: NSObject, NSApplicationDelegate, UNUserNotificationCenter
     }
     @objc func quit() {
         quitting = true
-        // Finish pending preference writes before the controller's final snapshot.
-        notificationQueue.async { DispatchQueue.main.async {
+        // Include pending OS callbacks/history writes in the final snapshot.
+        drainNotifications {
             if self.process == nil { NSApp.terminate(nil) } else { self.send(["action": "quit"]) }
-        } }
+        }
+    }
+    func drainNotifications(_ completion: @escaping () -> Void) {
+        notificationOperations.notify(queue: .main) {
+            self.notificationQueue.async { DispatchQueue.main.async(execute: completion) }
+        }
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if process != nil { quit(); return .terminateCancel }; return .terminateNow
@@ -488,6 +500,7 @@ final class Companion: NSObject, NSApplicationDelegate, UNUserNotificationCenter
         if bridgeWorkspace == id { return }
         if !bridgeWorkspace.isEmpty { center.removeAllPendingNotificationRequests() }
         bridgeWorkspace = id
+        activateNotificationHistory()
         token = UUID().uuidString
         let value = ["url": "http://127.0.0.1:\(port.rawValue)/notify", "token": token, "workspace": id]
         do {
@@ -520,9 +533,12 @@ final class Companion: NSObject, NSApplicationDelegate, UNUserNotificationCenter
             let identityParts = [value["task_id"] ?? "", value["alert_id"] ?? (value["subject"] ?? "Watcher"), key]
             let identity = self.bridgeWorkspace + ":" + String(data: try! JSONEncoder().encode(identityParts), encoding: .utf8)!
             if (self.defaults.stringArray(forKey: "notifications") ?? []).contains(identity) { self.reply(connection, 200); return }
-            guard !self.notificationsInFlight.contains(identity), let store = self.notificationStore else { self.reply(connection, 503); return }
+            guard !self.quitting, !self.notificationsInFlight.contains(identity), let store = self.notificationStore,
+                  let history = self.historyStore else { self.reply(connection, 503); return }
             self.notificationsInFlight.insert(identity)
+            self.notificationOperations.enter()
             let workspace = self.bridgeWorkspace
+            let days = self.historyDays, timestamp = Date().timeIntervalSince1970
             let alert = DesktopAlert(taskID: value["task_id"] ?? "", alertID: value["alert_id"] ?? (value["subject"] ?? "Watcher"),
                                      subject: value["subject"] ?? "Watcher", body: text)
             self.notificationQueue.async {
@@ -530,10 +546,16 @@ final class Companion: NSObject, NSApplicationDelegate, UNUserNotificationCenter
                     let suppressed = try store.update { $0.suppress(alert, now: Date().timeIntervalSince1970) }
                     DispatchQueue.main.async {
                         guard self.bridgeWorkspace == workspace else {
-                            self.notificationsInFlight.remove(identity); self.reply(connection, 409); return
+                            self.rejectNotification(identity, connection: connection, code: 409); return
                         }
                         if suppressed || self.defaults.bool(forKey: "muted") {
-                            self.acceptNotification(identity, connection: connection); return
+                            let occurrence = NotificationOccurrence(id: identity, timestamp: timestamp, alert: alert,
+                                runID: value["run_id"], delivery: suppressed ? .snoozed : .muted, isEngine: false)
+                            self.persistNotification(occurrence, store: history, workspace: workspace, days: days) { success in
+                                if success && self.bridgeWorkspace == workspace { self.acceptNotification(identity, connection: connection) }
+                                else { self.rejectNotification(identity, connection: connection, code: success ? 409 : 503) }
+                            }
+                            return
                         }
                         let content = UNMutableNotificationContent()
                         content.title = alert.subject; content.body = alert.body; content.sound = .default
@@ -542,19 +564,26 @@ final class Companion: NSObject, NSApplicationDelegate, UNUserNotificationCenter
                         self.center.add(UNNotificationRequest(identifier: identity, content: content, trigger: nil)) { error in
                             DispatchQueue.main.async {
                                 if error != nil {
-                                    self.notificationsInFlight.remove(identity); self.reply(connection, 503)
+                                    self.rejectNotification(identity, connection: connection, code: 503)
                                 } else if self.bridgeWorkspace != workspace {
                                     self.center.removePendingNotificationRequests(withIdentifiers: [identity])
                                     self.center.removeDeliveredNotifications(withIdentifiers: [identity])
-                                    self.notificationsInFlight.remove(identity); self.reply(connection, 409)
-                                } else { self.acceptNotification(identity, connection: connection) }
+                                    self.rejectNotification(identity, connection: connection, code: 409)
+                                } else {
+                                    let occurrence = NotificationOccurrence(id: identity, timestamp: timestamp, alert: alert,
+                                        runID: value["run_id"], delivery: .sent, isEngine: false)
+                                    self.persistNotification(occurrence, store: history, workspace: workspace, days: days) { success in
+                                        if success && self.bridgeWorkspace == workspace { self.acceptNotification(identity, connection: connection) }
+                                        else { self.rejectNotification(identity, connection: connection, code: success ? 409 : 503) }
+                                    }
+                                }
                             }
                         }
                     }
                 } catch {
                     DispatchQueue.main.async {
-                        self.notificationsInFlight.remove(identity); self.reply(connection, 503)
-                        self.notificationError(error)
+                        self.rejectNotification(identity, connection: connection, code: 503)
+                        if self.bridgeWorkspace == workspace { self.notificationError(error) }
                     }
                 }
             }
@@ -565,7 +594,39 @@ final class Companion: NSObject, NSApplicationDelegate, UNUserNotificationCenter
         seen.append(identity)
         defaults.set(Array(seen.suffix(2000)), forKey: "notifications")
         notificationsInFlight.remove(identity)
+        notificationOperations.leave()
         reply(connection, 200)
+    }
+    func rejectNotification(_ identity: String, connection: NWConnection, code: Int) {
+        notificationsInFlight.remove(identity)
+        notificationOperations.leave()
+        reply(connection, code)
+    }
+    func notifyEngineStopped() {
+        guard let history = historyStore else { return }
+        let workspace = bridgeWorkspace, days = historyDays
+        let identity = "watcher-engine-error:" + UUID().uuidString
+        let alert = DesktopAlert(taskID: "", alertID: "engine-stopped", subject: "Watcher engine stopped",
+            body: "Automation is unavailable. Open Watcher to inspect the error and restart.")
+        let timestamp = Date().timeIntervalSince1970
+        notificationOperations.enter()
+        let persist: (NotificationDelivery) -> Void = { delivery in
+            let occurrence = NotificationOccurrence(id: identity, timestamp: timestamp, alert: alert,
+                runID: nil, delivery: delivery, isEngine: true)
+            self.persistNotification(occurrence, store: history, workspace: workspace, days: days) { _ in
+                self.notificationOperations.leave()
+            }
+        }
+        if defaults.bool(forKey: "muted") { persist(.muted); return }
+        let content = UNMutableNotificationContent()
+        content.title = alert.subject; content.body = alert.body
+        content.userInfo = ["workspace": workspace, "kind": "engine"]
+        center.add(UNNotificationRequest(identifier: identity, content: content, trigger: nil)) { error in
+            DispatchQueue.main.async {
+                if error == nil { persist(.sent) }
+                else { self.notificationOperations.leave() }
+            }
+        }
     }
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) { completionHandler([.banner, .sound]) }
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
@@ -602,13 +663,62 @@ enum WatcherMain {
         // starting a controller or changing notification/login preferences.
         if delegate.smoke, let path = ProcessInfo.processInfo.environment["WATCHER_SMOKE_MENU_STATE"] {
             delegate.state = try! JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: path))) as! [String: Any]
+            if let values = delegate.state["notification_history"] as? [[String: Any]] {
+                delegate.recentNotifications = try! JSONDecoder().decode([NotificationOccurrence].self,
+                    from: JSONSerialization.data(withJSONObject: values))
+                delegate.historyLoaded = true
+            }
+            delegate.historyError = delegate.state["notification_history_error"] as? String
             delegate.item = NSStatusBar.system.statusItem(withLength: 30)
+            if ProcessInfo.processInfo.environment["WATCHER_SMOKE_HISTORY_LIFECYCLE"] != nil {
+                delegate.inspectHistoryLifecycle()
+                return
+            }
             delegate.rebuild()
+            if ProcessInfo.processInfo.environment["WATCHER_SMOKE_HISTORY_WINDOW"] != nil {
+                if let appearance = ProcessInfo.processInfo.environment["WATCHER_SMOKE_HISTORY_APPEARANCE"] {
+                    app.appearance = NSAppearance(named: NSAppearance.Name(appearance))
+                }
+                let window = NotificationHistoryWindow(companion: delegate, store: NotificationHistoryStore(path: "/unused"),
+                    workspace: "synthetic", days: 90, name: "Synthetic Workspace")
+                window.occurrences = delegate.recentNotifications
+                window.table.reloadData()
+                window.table.selectRowIndexes(IndexSet(integer: min(1, max(0, window.occurrences.count - 1))), byExtendingSelection: false)
+                window.window!.makeFirstResponder(window.table)
+                if window.occurrences.count > 2 {
+                    let down = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                        windowNumber: window.window!.windowNumber, context: nil, characters: "\u{F701}",
+                        charactersIgnoringModifiers: "\u{F701}", isARepeat: false, keyCode: 125)!
+                    window.table.keyDown(with: down)
+                    precondition(window.selected?.id == window.occurrences[2].id)
+                    window.table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+                }
+                let before = window.message.string
+                window.newNotificationsAvailable()
+                precondition(window.message.string == before)
+                window.window!.contentView!.layoutSubtreeIfNeeded()
+                let report: [String: Any] = ["text": window.message.string, "selected": window.selected?.id ?? "",
+                    "copy": window.copyButton.isEnabled, "snooze": window.snoozeButton.isEnabled,
+                    "open_run": window.runButton.isEnabled, "detail_width": window.message.enclosingScrollView!.frame.width,
+                    "detail_height": window.message.enclosingScrollView!.frame.height,
+                    "update_notice": window.status.stringValue]
+                if let path = ProcessInfo.processInfo.environment["WATCHER_SMOKE_HISTORY_IMAGE"],
+                   let view = window.window?.contentView,
+                   let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+                    view.cacheDisplay(in: view.bounds, to: bitmap)
+                    try! bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: path))
+                }
+                FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: report) + Data([10]))
+                NSStatusBar.system.removeStatusItem(delegate.item)
+                return
+            }
             func rows(_ menu: NSMenu) -> [[String: Any]] {
                 menu.items.map { row in
                     var value: [String: Any] = ["title": row.title, "enabled": row.isEnabled, "separator": row.isSeparatorItem]
                     if let action = row.action { value["action"] = NSStringFromSelector(action) }
                     if let path = row.representedObject as? String { value["path"] = path }
+                    if let occurrence = row.representedObject as? NotificationOccurrence { value["occurrence"] = occurrence.id }
+                    if let tooltip = row.toolTip { value["tooltip"] = tooltip }
                     if let child = row.submenu { value["children"] = rows(child) }
                     return value
                 }
