@@ -68,6 +68,8 @@ application-checkout/
 
 Installed task dependencies are local to each Mac under `~/Library/Application Support/Watcher/environments/`, separate from the application's environment. Opening a new workspace installs them automatically and reports progress. Dependency changes drain current work and prepare a new environment before admission resumes.
 
+Task environments also use the checkout's locked engine constraints. After an application dependency update, each workspace gets a new environment when its engine next starts, even if its own requirements are unchanged. A conflicting workspace pin produces a setup error; old cached environments remain on disk.
+
 ## Recovery and updates
 
 Quit Watcher on the old Mac and let your file-sync tool finish. On the new Mac, run setup and select the synced workspace. If no local database exists, Watcher restores the latest usable snapshot automatically. A healthy existing local database takes precedence over snapshots.
