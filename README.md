@@ -4,12 +4,16 @@ Watcher runs local Prefect automations with a native macOS menu bar companion. P
 
 This is a local first version, not a published or notarized release. Requires macOS 13+, Apple command-line developer tools, and [uv](https://docs.astral.sh/uv/getting-started/installation/). Python 3.12 is provisioned by uv. The engine is pinned to Prefect 3.8.8; the lockfile includes a SQLAlchemy 2.0 compatibility constraint found necessary in scheduler integration testing.
 
-## Setup
+## Install or update
+
+If Watcher is running, choose **Quit Watcher (finish active work)** and wait for it to exit. Then, from this checkout:
 
 ```sh
-./scripts/setup.sh
+./install.sh
 ./start.sh
 ```
+
+Use these same commands after source changes to install the updated app. Editing application source does not update the compiled menu bar app. The installer installs the checkout's locked dependencies and rebuilds `build/Watcher.app`; `start.sh` opens it. Your workspace, preferences, and local runtime data are preserved. The installer refuses to rebuild while the engine holds its instance lock. The older `scripts/setup.sh` and `scripts/update.sh` entry points remain available.
 
 On first launch, choose **Create Workspace**, **Open Existing Workspace**, or **Try the Example**. Create Workspace asks for a name and location outside this checkout. Try the Example creates a persistent workspace at `~/Library/Application Support/Watcher/Example Workspace`; choosing it again reopens it without replacing your edits. Watcher remembers the selected workspace and opens it automatically next time. These choices remain available under **Workspace**, along with **Show in Finder**. Choosing Later or cancelling a folder dialog leaves Watcher available in the menu bar without starting a workspace.
 
@@ -76,7 +80,7 @@ To explicitly recover an older/corrupt local context, quit Watcher and run:
 
 Recovery verifies workspace identity, checksums, SQLite integrity, and Prefect version, and falls back past incomplete or corrupt candidates. Previous local databases are preserved under `.watcher-runtime/<workspace-id>/before-restore-*`. Do not run the same workspace on two Macs at once. Recent activity after the last synchronized snapshot can be lost. Code/configuration/auth files must also finish syncing.
 
-For an explicit application/engine update, quit Watcher, obtain the desired source revision, then run `./scripts/update.sh`. It installs the revision's locked versions and rebuilds the app; it does not fetch or publish source. Engine upgrades require reviewing the version-pinned adapter and integration suite. Snapshot restoration across different Prefect versions is deliberately rejected; restore with the snapshot's version first.
+For an explicit application/engine update, quit Watcher, obtain the desired source revision, then run `./install.sh` followed by `./start.sh`. Installation uses the revision's locked versions and rebuilds the app; it does not fetch or publish source. Engine upgrades require reviewing the version-pinned adapter and integration suite. Snapshot restoration across different Prefect versions is deliberately rejected; restore with the snapshot's version first.
 
 ## Verification
 

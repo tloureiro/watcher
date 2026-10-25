@@ -100,7 +100,7 @@ final class Companion: NSObject, NSApplicationDelegate, UNUserNotificationCenter
         let data = try Data(contentsOf: localHome.appendingPathComponent("install.json"))
         guard let settings = try JSONSerialization.jsonObject(with: data) as? [String: String],
               settings["python"] != nil, settings["uv"] != nil else {
-            throw NSError(domain: "Watcher", code: 1, userInfo: [NSLocalizedDescriptionKey: "Run scripts/setup.sh before opening Watcher."])
+            throw NSError(domain: "Watcher", code: 1, userInfo: [NSLocalizedDescriptionKey: "Run ./install.sh in the Watcher checkout before opening Watcher."])
         }
         return settings
     }
