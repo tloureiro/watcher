@@ -3,6 +3,20 @@ import asyncio
 import httpx
 
 
+async def read_latest_artifact(client, scope):
+    """Newest published user-facing artifact within a Prefect filter scope."""
+    response = await client.post("/artifacts/filter", json={**scope, "artifacts": {
+        "type": {"not_any_": ["result", "progress"]}}, "sort": "CREATED_DESC", "limit": 1})
+    response.raise_for_status()
+    artifacts = response.json()
+    return artifacts[0] if artifacts else None
+
+
+async def read_run_artifact(port, run_id):
+    async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}/api", timeout=5) as client:
+        return await read_latest_artifact(client, {"flow_runs": {"id": {"any_": [run_id]}}})
+
+
 async def read_task_menu(port, tasks):
     if not tasks:
         return []
@@ -22,13 +36,12 @@ async def read_task_menu(port, tasks):
             if deployment["paused"] or (schedules and not any(s["active"] for s in schedules)):
                 continue
             scope = {"deployments": {"id": {"any_": [identity]}}}
-            runs, artifacts = await asyncio.gather(
+            runs, artifact = await asyncio.gather(
                 request("/flow_runs/filter", {**scope, "flow_runs": {"state": {"type": {
                     "not_any_": ["SCHEDULED"]}}}, "sort": "START_TIME_DESC", "limit": 1}),
-                request("/artifacts/filter", {**scope, "artifacts": {"type": {
-                    "not_any_": ["result", "progress"]}}, "sort": "CREATED_DESC", "limit": 1}),
+                read_latest_artifact(client, scope),
             )
             rows.append({"id": name, "deployment_id": identity,
                          "run": {k: runs[0].get(k) for k in ("id", "state_name")} if runs else None,
-                         "artifact": {k: artifacts[0].get(k) for k in ("id", "key", "type", "created")} if artifacts else None})
+                         "artifact": {k: artifact.get(k) for k in ("id", "key", "type", "created")} if artifact else None})
         return rows

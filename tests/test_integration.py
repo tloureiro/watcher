@@ -107,7 +107,7 @@ def test_real_lifecycle_reload_result_restore(tmp_path):
         # The click resolves again, rather than opening the report id cached
         # before a new report arrived. A newer run without output keeps the
         # previous full report available.
-        newest = h.api.post("/artifacts/", json={"type": "markdown", "data": "New full report", "flow_run_id": completed["id"]})
+        newest = h.api.post("/artifacts/", json={"type": "markdown", "key": "notification-report", "data": "New full report", "flow_run_id": completed["id"]})
         newest.raise_for_status()
         empty_run = h.api.post("/flow_runs/", json={"flow_id": completed["flow_id"], "deployment_id": completed["deployment_id"],
             "state": {"type": "RUNNING"}})
@@ -116,6 +116,17 @@ def test_real_lifecycle_reload_result_restore(tmp_path):
         h.command("latest_artifact", task="synthetic")
         link = h.wait(lambda s: bool(s.get("open_artifact")))
         assert link["open_artifact"] == newest.json()["id"] and link["workspace_id"] == h.ws.id
+        # Notification clicks use their exact originating run, even if a newer
+        # run of the same deployment publishes a report under the same key.
+        h.command("notification_artifact", workspace_id=h.ws.id, run_id=empty_run.json()["id"])
+        assert h.wait(lambda s: bool(s.get("open_run")))["open_run"] == empty_run.json()["id"]
+        h.api.post("/artifacts/", json={"type": "markdown", "key": "notification-report", "data": "Later run report",
+            "flow_run_id": empty_run.json()["id"]}).raise_for_status()
+        for kind in ["progress", "result"]:
+            h.api.post("/artifacts/", json={"type": kind, "data": "internal", "flow_run_id": completed["id"]}).raise_for_status()
+        h.command("notification_artifact", workspace_id=h.ws.id, run_id=completed["id"])
+        link = h.wait(lambda s: bool(s.get("open_artifact")))
+        assert link == {"open_artifact": newest.json()["id"], "workspace_id": h.ws.id}
         assert completed["state"]["data"]  # Persisted result reference.
         h.until(lambda: any("synthetic stdout" in log["message"] for log in h.api.post("/logs/filter", json={"logs": {"flow_run_id": {"any_": [completed["id"]]}}}).json()))
         deployments = h.api.post("/deployments/filter", json={}).json()

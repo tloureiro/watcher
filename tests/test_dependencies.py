@@ -1,14 +1,121 @@
-"""Real installs in disposable flow environments; no server or tasks run."""
+"""Dependency preparation with synthetic installers and disposable real environments."""
 import asyncio
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
+from types import SimpleNamespace
 
 import pytest
 
 from watcher import dependencies
 from watcher.workspace import Workspace
+
+
+@pytest.fixture
+def installer_fixture(tmp_path, monkeypatch):
+    monkeypatch.setenv("WATCHER_LOCAL_HOME", str(tmp_path / "local"))
+    ws = Workspace.initialize(tmp_path / "workspace")
+    _, _, _, base = dependencies.location(ws)
+    python = base / "bin/python"
+    python.parent.mkdir(parents=True)
+    python.write_text("synthetic environment")
+    attempts = ws.runtime / "attempts.json"
+    installer = tmp_path / "uv-fixture"
+    installer.write_text(f"#!{sys.executable}\n" + '''import json, os, sys, time
+from pathlib import Path
+attempts = Path(os.environ["INSTALLER_ATTEMPTS"])
+count = json.loads(attempts.read_text()) + 1 if attempts.exists() else 1
+attempts.write_text(json.dumps(count))
+python = Path(sys.argv[sys.argv.index("--python") + 1])
+assert not (python.parent.parent / "watcher-dependencies.sha256").exists()
+if os.environ.get("INSTALLER_WAIT"):
+    print("waiting", flush=True)
+    time.sleep(60)
+if count <= int(os.environ["INSTALLER_FAILURES"]):
+    sys.stderr.buffer.write(b"error: temporary name resolution failure\\ninvalid diagnostic: \\xff\\n")
+    sys.exit(1)
+print("Synthetic packages installed")
+''')
+    installer.chmod(0o700)
+    monkeypatch.setenv("WATCHER_UV", str(installer))
+    monkeypatch.setenv("INSTALLER_ATTEMPTS", str(attempts))
+    events = []
+    guardian = SimpleNamespace(add=lambda pid: events.append(("add", pid)),
+                               remove=lambda pid: events.append(("remove", pid)))
+    return ws, base, attempts, guardian, events
+
+
+@pytest.mark.parametrize("failures", [2, 3])
+def test_install_retry_recovery_and_exhaustion(installer_fixture, monkeypatch, failures):
+    ws, base, attempts, guardian, events = installer_fixture
+    monkeypatch.setenv("INSTALLER_FAILURES", str(failures))
+    waits = []
+
+    async def wait(delay):
+        waits.append(delay)
+        assert not (base / "watcher-dependencies.sha256").exists()
+
+    monkeypatch.setattr(dependencies.asyncio, "sleep", wait)
+    messages = []
+    if failures == 3:
+        with pytest.raises(RuntimeError, match="Dependency installation failed after 3") as error:
+            asyncio.run(dependencies.prepare(ws, messages.append, guardian))
+        assert str(ws.runtime / "dependencies.log") in str(error.value)
+        assert dependencies.needs_update(ws)
+        assert not (base / "watcher-dependencies.sha256").exists()
+    else:
+        assert asyncio.run(dependencies.prepare(ws, messages.append, guardian)) == base / "bin/python"
+        assert not dependencies.needs_update(ws)
+        log = (ws.runtime / "dependencies.log").read_text()
+        messages.clear()
+        assert asyncio.run(dependencies.prepare(ws, messages.append, guardian)) == base / "bin/python"
+        assert messages == [] and (ws.runtime / "dependencies.log").read_text() == log
+    assert json.loads(attempts.read_text()) == 3 and waits == [5, 15]
+    assert len(events) == 6
+    assert all(events[i][0] == "add" and events[i+1] == ("remove", events[i][1]) for i in (0, 2, 4))
+    log = (ws.runtime / "dependencies.log").read_text()
+    assert log.count("temporary name resolution failure") == failures
+    assert "attempt 3/3" in log and "Process exited with status" in log
+    assert "invalid diagnostic: �" in log
+
+
+@pytest.mark.parametrize("during", ["wait", "install"])
+def test_install_retry_cancellation_cleans_up(installer_fixture, monkeypatch, during):
+    ws, base, attempts, guardian, events = installer_fixture
+    monkeypatch.setenv("INSTALLER_FAILURES", "3")
+    if during == "install":
+        monkeypatch.setenv("INSTALLER_WAIT", "1")
+
+    async def cancel_wait(delay):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(dependencies.asyncio, "sleep", cancel_wait)
+
+    def report(message):
+        if message == "waiting":
+            asyncio.current_task().cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(dependencies.prepare(ws, report, guardian))
+    assert json.loads(attempts.read_text()) == 1
+    assert len(events) == 2 and events[1] == ("remove", events[0][1])
+    with pytest.raises(ProcessLookupError):
+        os.kill(events[0][1], 0)
+    assert not (base / "watcher-dependencies.sha256").exists()
+    assert dependencies.needs_update(ws)
+
+
+def test_missing_installer_is_logged_without_retries(installer_fixture, monkeypatch):
+    ws, base, attempts, guardian, events = installer_fixture
+    monkeypatch.setenv("WATCHER_UV", str(ws.runtime / "missing-uv"))
+    with pytest.raises(RuntimeError, match="Could not start dependency installer") as error:
+        asyncio.run(dependencies.prepare(ws, lambda message: None, guardian))
+    assert str(ws.runtime / "dependencies.log") in str(error.value)
+    assert "Could not start installer" in (ws.runtime / "dependencies.log").read_text()
+    assert not attempts.exists() and events == [] and dependencies.needs_update(ws)
 
 
 @pytest.mark.integration

@@ -35,6 +35,8 @@ The artifact action opens the newest retained full Prefect artifact in its full 
 
 **Recent Notifications**, **Recent Activity**, and **Open Prefect Dashboard** stay at the top level. Hover Recent Notifications for the newest ten messages and their ages; hover a message for its full preview, or click it to read selectable full text. **View All Notifications…** opens older history with Copy Message, Open Run (when available), and Snooze actions. Muted and snoozed occurrences remain visible with labels. History follows the workspace's `history_days` retention (90 days by default) and snapshots. Less frequent controls are grouped under **Automation**, **Notifications**, **Workspace**, and **Settings**. The advisory last-reported host/time lives under Workspace. Quit stays at the bottom. **Settings (Attention)** flags login startup failures or approval requirements; the existing login controls are inside that submenu.
 
+Clicking a desktop notification opens the newest published user-facing Prefect artifact from that exact run, excluding progress and internal results. If no artifact is available or lookup fails, it opens the original run. Notifications from a previously selected workspace are ignored.
+
 - **Open Prefect Dashboard / Recent Activity:** use Prefect's existing UI.
 - **Run Task:** submit a manual deployment run, including while scheduling is paused.
 - **Pause Scheduling:** hold automatic execution while allowing manual work and active work to finish. Already queued automatic runs stay queued.
@@ -46,6 +48,8 @@ The artifact action opens the newest retained full Prefect artifact in its full 
 - **Silenced Notifications…:** inspect, resume, or extend individual snoozes. They survive restarts and follow workspace snapshots to another Mac; expiry includes sleep/downtime and resumes at the next qualifying check without replaying suppressed messages. **Mute Notifications** remains a separate per-Mac global control.
 
 A definition/dependency error stays visible in the menu. Valid code remains available after an invalid edit. After an unexpected engine failure, disable and enable automation to restart. The companion does not endlessly restart intentional stops. Another Mac's last-seen timestamp is advisory, never a live ownership lock.
+
+After a dependency update, the next startup may need network access to prepare the task environment. Failed package installs retry twice, after 5 and 15 seconds. Persistent failures show the path to the private `dependencies.log` with the installer output. An already prepared environment is reused without reinstalling.
 
 ## Tasks and data
 

@@ -8,6 +8,7 @@ import socket
 import sys
 import time
 from pathlib import Path
+from uuid import UUID
 import httpx
 from watchfiles import awatch
 from .workspace import Workspace, local_home, atomic_json
@@ -265,6 +266,23 @@ class Service:
             if not rows or not rows[0]["artifact"]:
                 raise RuntimeError("This task is paused or no longer has a retained artifact. Reopen Active Tasks to refresh.")
             print(json.dumps({"open_artifact": rows[0]["artifact"]["id"], "workspace_id": self.ws.id}), flush=True)
+        elif action == "notification_artifact":
+            # A delayed click/command must never resolve in another workspace.
+            if data.get("workspace_id") != self.ws.id:
+                return
+            run_id = str(UUID(data["run_id"]))
+            artifact_id = None
+            if not self.disabled and self.server and self.server.returncode is None:
+                from .task_menu import read_run_artifact
+                try:
+                    artifact = await read_run_artifact(self.port, run_id)
+                    if artifact:
+                        artifact_id = str(UUID(artifact["id"]))
+                except Exception:
+                    # Navigation is best effort; leave automation/error state alone.
+                    pass
+            target = {"open_artifact": artifact_id} if artifact_id else {"open_run": run_id}
+            print(json.dumps({**target, "workspace_id": self.ws.id}), flush=True)
         elif action == "enable":
             self.disabled = False
             self.save_preferences()

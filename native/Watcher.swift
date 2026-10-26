@@ -320,16 +320,22 @@ final class Companion: NSObject, NSApplicationDelegate, UNUserNotificationCenter
 
         } catch { state["error"] = error.localizedDescription; rebuild() }
     }
-    func receive(_ data: Data) {
+    func prefectURL(_ value: [String: Any]) -> URL? {
+        guard let workspace = value["workspace_id"] as? String, workspace == bridgeWorkspace,
+              workspace == state["workspace_id"] as? String,
+              let base = state["dashboard"] as? String else { return nil }
+        let artifact = value["open_artifact"] as? String
+        guard let id = artifact ?? value["open_run"] as? String, UUID(uuidString: id) != nil else { return nil }
+        return URL(string: base + (artifact == nil ? "/runs/flow-run/" : "/artifacts/artifact/") + id)
+    }
+    func receive(_ data: Data, openURL: (URL) -> Void = { NSWorkspace.shared.open($0) }) {
         output.append(data)
         while let end = output.firstIndex(of: 10) {
             let line = output.prefix(upTo: end)
             output.removeSubrange(...end)
             if let value = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
-               value["workspace_id"] as? String == state["workspace_id"] as? String,
-               let id = value["open_artifact"] as? String, UUID(uuidString: id) != nil,
-               let base = state["dashboard"] as? String, let url = URL(string: base + "/artifacts/artifact/" + id) {
-                NSWorkspace.shared.open(url)
+               let url = prefectURL(value) {
+                openURL(url)
                 continue
             }
             if let value = try? JSONSerialization.jsonObject(with: line) as? [String: Any], value["phase"] != nil {
@@ -629,15 +635,29 @@ final class Companion: NSObject, NSApplicationDelegate, UNUserNotificationCenter
         }
     }
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) { completionHandler([.banner, .sound]) }
+    func openDesktopNotification(_ info: [String: String], resolve: ([String: Any]) -> Void,
+                                 openURL: (URL) -> Void) {
+        guard info["workspace"] == bridgeWorkspace else { return }
+        let run = info["run_id"] ?? ""
+        if UUID(uuidString: run) != nil {
+            resolve(["action": "notification_artifact", "workspace_id": bridgeWorkspace, "run_id": run])
+        } else {
+            let base = state["dashboard"] as? String ?? "http://127.0.0.1:4200"
+            if let url = URL(string: base) { openURL(url) }
+        }
+    }
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
         let info = response.notification.request.content.userInfo as? [String: String] ?? [:]
         DispatchQueue.main.async {
             guard info["workspace"] == self.bridgeWorkspace else { return }
             if response.actionIdentifier == "snooze", let alert = DesktopAlert(info) { self.chooseSnooze(alert) }
             else if response.actionIdentifier == UNNotificationDefaultActionIdentifier {
-                let run = info["run_id"] ?? ""
-                let base = self.state["dashboard"] as? String ?? "http://127.0.0.1:4200"
-                if let url = URL(string: base + (run.isEmpty ? "" : "/runs/flow-run/" + run)) { NSWorkspace.shared.open(url) }
+                self.openDesktopNotification(info, resolve: { command in
+                    if self.process?.isRunning == true { self.send(command) }
+                    else if let url = self.prefectURL(["workspace_id": self.bridgeWorkspace, "open_run": command["run_id"]!]) {
+                        NSWorkspace.shared.open(url)
+                    }
+                }, openURL: { NSWorkspace.shared.open($0) })
             }
         }
         completionHandler()
@@ -669,6 +689,20 @@ enum WatcherMain {
                 delegate.historyLoaded = true
             }
             delegate.historyError = delegate.state["notification_history_error"] as? String
+            if let info = delegate.state["notification_click"] as? [String: String] {
+                delegate.bridgeWorkspace = delegate.state["workspace_id"] as? String ?? ""
+                var commands: [[String: Any]] = [], urls: [String] = []
+                delegate.openDesktopNotification(info, resolve: { commands.append($0) }, openURL: { urls.append($0.absoluteString) })
+                if let workspace = delegate.state["notification_click_workspace_after"] as? String {
+                    delegate.bridgeWorkspace = workspace; delegate.state["workspace_id"] = workspace
+                }
+                for reply in delegate.state["notification_click_replies"] as? [[String: Any]] ?? [] {
+                    delegate.receive(try! JSONSerialization.data(withJSONObject: reply) + Data([10]),
+                        openURL: { urls.append($0.absoluteString) })
+                }
+                FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: ["commands": commands, "urls": urls]) + Data([10]))
+                return
+            }
             delegate.item = NSStatusBar.system.statusItem(withLength: 30)
             if ProcessInfo.processInfo.environment["WATCHER_SMOKE_HISTORY_LIFECYCLE"] != nil {
                 delegate.inspectHistoryLifecycle()
