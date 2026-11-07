@@ -119,7 +119,8 @@ def test_missing_installer_is_logged_without_retries(installer_fixture, monkeypa
 
 
 @pytest.mark.integration
-def test_engine_security_update_replaces_flow_environment(tmp_path, monkeypatch, uv_executable):
+@pytest.mark.parametrize("vulnerable_pin", ["certifi==2026.7.22", "oauthlib==4.0.0"])
+def test_engine_security_update_replaces_flow_environment(tmp_path, monkeypatch, uv_executable, vulnerable_pin):
     source = Path(__file__).resolve().parents[1]
     checkout = tmp_path / "checkout"
     checkout.mkdir()
@@ -134,7 +135,7 @@ def test_engine_security_update_replaces_flow_environment(tmp_path, monkeypatch,
     constraints = checkout / "requirements-engine.txt"
     current = constraints.read_bytes()
     # Model a previously cached environment without installing vulnerable code.
-    constraints.write_text("certifi==2026.7.22\n")
+    constraints.write_text(vulnerable_pin + "\n")
     _, requirements, old_digest, old_base = dependencies.location(ws)
     (old_base / "bin").mkdir(parents=True)
     (old_base / "bin/python").write_text("old environment sentinel")
@@ -150,16 +151,16 @@ def test_engine_security_update_replaces_flow_environment(tmp_path, monkeypatch,
     assert not dependencies.needs_update(ws)
     subprocess.run([uv_executable, "pip", "check", "--python", str(python)], check=True)
     versions = json.loads(subprocess.check_output([str(python), "-c",
-        "import certifi, httpx, prefect, sqlalchemy, json; "
-        "print(json.dumps([certifi.__version__, prefect.__version__, sqlalchemy.__version__]))"], text=True))
-    assert versions == ["2026.10.23", "3.8.8", "2.0.55"]
+        "import certifi, httpx, oauthlib, prefect, sqlalchemy, json; "
+        "print(json.dumps([certifi.__version__, oauthlib.__version__, prefect.__version__, sqlalchemy.__version__]))"], text=True))
+    assert versions == ["2026.10.23", "4.0.1", "3.8.8", "2.0.55"]
     messages.clear()
     assert asyncio.run(dependencies.prepare(ws, messages.append)) == python
     assert messages == []  # A validated environment is reused without installation.
     assert (old_base / "bin/python").read_text() == "old environment sentinel"
     # A workspace cannot override the patched engine pin, and failure must not
     # mark a partially prepared environment as usable or damage the good one.
-    requirements.write_text("certifi==2026.7.22\n")
+    requirements.write_text(vulnerable_pin + "\n")
     _, _, _, failed_base = dependencies.location(ws)
     with pytest.raises(RuntimeError, match="Dependency installation failed"):
         asyncio.run(dependencies.prepare(ws, messages.append))
